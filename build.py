@@ -9,6 +9,7 @@
 
 ##### IMPORT #################################################################
 
+import json
 import os
 import requests
 import shutil
@@ -19,6 +20,11 @@ import tarfile
 PATH_THIS = os.path.abspath (os.path.dirname (__file__))
 PATH_ARTIFACTS = os.path.join (PATH_THIS, 'artifacts')
 PATH_BIN = os.path.join (PATH_THIS, 'bin')
+
+ARCH_OSES = [
+   'catalina',       # 10.15 x86_64
+   'arm64_big_sur',  # 11 arm64
+]
 
 
 
@@ -57,102 +63,105 @@ def extract_brew_package (name, package_sha256, os_arch):
       tf.extractall (output_dir)
 
 
+#-- get_formula_info ---------------------------------------------------------
+
+def get_formula_info (name):
+   r = requests.get (f'https://formulae.brew.sh/api/formula/{name}.json')
+   formula = json.loads (r.content)
+   version = formula ['versions']['stable']
+   if formula ['revision'] != 0:
+      version += '_' + formula ['revision']
+   return {
+      'name': name,
+      ARCH_OSES [0]: formula ['bottle']['stable']['files'][ARCH_OSES [0]]['sha256'],
+      ARCH_OSES [1]: formula ['bottle']['stable']['files'][ARCH_OSES [1]]['sha256'],
+      'version': version,
+   }
+
+
+#-- download_formula ---------------------------------------------------------
+
+def download_formula (info):
+   for arch_os in ARCH_OSES:
+      download_brew_package (info ['name'], info [arch_os])
+      extract_brew_package (info ['name'], info [arch_os], arch_os)
+
+
+#-- allow_write_exec ---------------------------------------------------------
+
+def allow_write_exec (info, item):
+   for arch_os in ARCH_OSES:
+      bin = os.path.join (PATH_ARTIFACTS, arch_os, info ['name'], info ['version'], item)
+      subprocess.check_call (['chmod', '755', bin])
+
+
+#-- allow_write_dylib --------------------------------------------------------
+
+def allow_write_dylib (info, item):
+   for arch_os in ARCH_OSES:
+      bin = os.path.join (PATH_ARTIFACTS, arch_os, info ['name'], info ['version'], item)
+      subprocess.check_call (['chmod', '644', bin])
+
+
+#-- add_rpath ----------------------------------------------------------------
+
+def add_rpath (info, item):
+   for arch_os in ARCH_OSES:
+      bin = os.path.join (PATH_ARTIFACTS, arch_os, info ['name'], info ['version'], item)
+      subprocess.check_call ([
+         'install_name_tool', '-add_rpath', '@executable_path/.',
+         bin
+      ])
+
+
+#-- change_rpath -------------------------------------------------------------
+
+def change_rpath (info, item):
+   for arch_os in ARCH_OSES:
+      bin = os.path.join (PATH_ARTIFACTS, arch_os, info ['name'], info ['version'], item)
+      output = subprocess.check_output (['otool', '-L', bin]).decode (sys.stdout.encoding)
+      lines = output.split ('\n')
+      for line in lines:
+         line = line.strip ()
+         path = line.split (' ')[0]
+         if '@@HOMEBREW_PREFIX@@' in path:
+            lib = path.split ('/')[-1]
+            subprocess.check_call (['install_name_tool', '-change', path, f'@rpath/{lib}', bin])
+
+
+#-- pack ---------------------------------------------------------------------
+
+def pack (info, item):
+   bins = map (lambda arch_os: os.path.join (PATH_ARTIFACTS, arch_os, info ['name'], info ['version'], item), ARCH_OSES)
+   name = item.split ('/')[-1]
+   subprocess.check_call ([
+      'lipo', *bins,
+      '-output', os.path.join (PATH_BIN, name),
+      '-create'
+   ])
+
+
 #-- build_dfu_util -----------------------------------------------------------
 
 def build_dfu_util ():
-   # https://formulae.brew.sh/api/formula/dfu-util.json
-   name = 'dfu-util'
-
-   package_sha256 = '5a5d86794a00b9559ffc819715c297da4f477296d20a92c804aefc426795d0b0'
-   arch_os = 'x86_64_catalina'
-   download_brew_package (name, package_sha256)
-   extract_brew_package (name, package_sha256, arch_os)
-
-   package_sha256 = 'c7dd53f422003b99c57f565aad8371e8cef1aa3de825f36cd927cd61ed64249d'
-   arch_os = 'arm64_big_sur'
-   download_brew_package (name, package_sha256)
-   extract_brew_package (name, package_sha256, arch_os)
-
-   amd64_bin = os.path.join (PATH_ARTIFACTS, 'x86_64_catalina', 'dfu-util', '0.11', 'bin', 'dfu-util')
-   arm64_bin = os.path.join (PATH_ARTIFACTS, 'arm64_big_sur', 'dfu-util', '0.11', 'bin', 'dfu-util')
-
-   subprocess.check_call (['chmod', '755', amd64_bin])
-   subprocess.check_call (['chmod', '755', arm64_bin])
-
-   subprocess.check_call ([
-      'install_name_tool', '-add_rpath', '@executable_path/.',
-      amd64_bin
-   ])
-
-   subprocess.check_call ([
-      'install_name_tool', '-change',
-      '@@HOMEBREW_PREFIX@@/opt/libusb/lib/libusb-1.0.0.dylib',
-      '@rpath/libusb-1.0.0.dylib',
-      amd64_bin
-   ])
-
-   subprocess.check_call ([
-      'install_name_tool', '-add_rpath', '@executable_path/.',
-      arm64_bin
-   ])
-
-   subprocess.check_call ([
-      'install_name_tool', '-change',
-      '@@HOMEBREW_PREFIX@@/opt/libusb/lib/libusb-1.0.0.dylib',
-      '@rpath/libusb-1.0.0.dylib',
-      arm64_bin
-   ])
-
-   universal_bin = os.path.join (PATH_BIN, 'dfu-util')
-
-   subprocess.check_call ([
-      'lipo', amd64_bin, arm64_bin,
-      '-output', universal_bin,
-      '-create'
-   ])
+   info = get_formula_info ('dfu-util')
+   download_formula (info)
+   item = 'bin/dfu-util'
+   allow_write_exec (info, item)
+   add_rpath (info, item)
+   change_rpath (info, item)
+   pack (info, item)
 
 
 #-- build_libusb -------------------------------------------------------------
 
 def build_libusb ():
-   # https://formulae.brew.sh/api/formula/libusb.json
-   name = 'libusb'
-
-   package_sha256 = '72ed40aec0356157f3d5071ecb28c481b3f3502985a320ec1848cdc8cf8483c1'
-   arch_os = 'x86_64_catalina'
-   download_brew_package (name, package_sha256)
-   extract_brew_package (name, package_sha256, arch_os)
-
-   package_sha256 = 'd9121e56c7dbfad640c9f8e3c3cc621d88404dc1047a4a7b7c82fe06193bca1f'
-   arch_os = 'arm64_big_sur'
-   download_brew_package (name, package_sha256)
-   extract_brew_package (name, package_sha256, arch_os)
-
-   amd64_bin = os.path.join (PATH_ARTIFACTS, 'x86_64_catalina', 'libusb', '1.0.26', 'lib', 'libusb-1.0.0.dylib')
-   arm64_bin = os.path.join (PATH_ARTIFACTS, 'arm64_big_sur', 'libusb', '1.0.26', 'lib', 'libusb-1.0.0.dylib')
-
-   subprocess.check_call (['chmod', '644', amd64_bin])
-   subprocess.check_call (['chmod', '644', arm64_bin])
-
-   subprocess.check_call ([
-      'install_name_tool', '-id',
-      'libusb-1.0.0.dylib',
-      amd64_bin
-   ])
-
-   subprocess.check_call ([
-      'install_name_tool', '-id',
-      'libusb-1.0.0.dylib',
-      arm64_bin
-   ])
-
-   universal_bin = os.path.join (PATH_BIN, 'libusb-1.0.0.dylib')
-
-   subprocess.check_call ([
-      'lipo', amd64_bin, arm64_bin,
-      '-output', universal_bin,
-      '-create'
-   ])
+   info = get_formula_info ('libusb')
+   download_formula (info)
+   item = 'lib/libusb-1.0.0.dylib'
+   allow_write_dylib (info, item)
+   change_rpath (info, item)
+   pack (info, item)
 
 
 #-- main ---------------------------------------------------------------------
