@@ -20,6 +20,7 @@ import tarfile
 PATH_THIS = os.path.abspath (os.path.dirname (__file__))
 PATH_ARTIFACTS = os.path.join (PATH_THIS, 'artifacts')
 PATH_BIN = os.path.join (PATH_THIS, 'bin')
+PATH_SHARE = os.path.join (PATH_THIS, 'share')
 
 ARCH_OSES = [
    'catalina',       # 10.15 x86_64
@@ -144,22 +145,41 @@ def pack (info, item):
    name = info ['name']
    version = info ['version']
    archs = info ['archs']
+   type = item.split ('/')[0]
    filename = item.split ('/')[-1]
 
    if len (archs) == 2:
-      bins = map (lambda arch: os.path.join (PATH_ARTIFACTS, arch ['arch_os'], name, version, item), archs)
-      subprocess.check_call ([
-         'lipo', *bins,
-         '-output', os.path.join (PATH_BIN, filename),
-         '-create',
-      ])
+      if type in ['bin', 'lib']:
+         bins = map (lambda arch: os.path.join (PATH_ARTIFACTS, arch ['arch_os'], name, version, item), archs)
+         subprocess.check_call ([
+            'lipo', *bins,
+            '-output', os.path.join (PATH_BIN, filename),
+            '-create',
+         ])
+      elif type == 'share':
+         # assume content for both arch is the same
+         shutil.copytree (
+            os.path.join (PATH_ARTIFACTS, archs [0]['arch_os'], name, version, item),
+            os.path.join (PATH_SHARE, filename)
+         )
+      else:
+         assert False
+
    else:
       assert len (archs) == 1
       arch_os = archs [0]['arch_os']
-      shutil.copy (
-         os.path.join (PATH_ARTIFACTS, arch_os, name, version, item),
-         os.path.join (PATH_BIN, filename)
-      )
+      if type in ['bin', 'lib']:
+         shutil.copy (
+            os.path.join (PATH_ARTIFACTS, arch_os, name, version, item),
+            os.path.join (PATH_BIN, filename)
+         )
+      elif type == 'share':
+         shutil.copytree (
+            os.path.join (PATH_ARTIFACTS, arch_os, name, version, item),
+            os.path.join (PATH_SHARE, filename)
+         )
+      else:
+         assert False
 
 
 #-- build_single_arch --------------------------------------------------------
@@ -204,12 +224,19 @@ def build_multi_arch (name, arch_oses, items):
       pack (info, item)
 
 
+#-- build_prepare ------------------------------------------------------------
+
+def build_prepare ():
+   for path in [PATH_BIN, PATH_SHARE]:
+      if os.path.exists (path):
+         shutil.rmtree (path)
+      os.makedirs (path)
+
+
 #-- build_catalina -----------------------------------------------------------
 
 def build_catalina ():
-   if os.path.exists (PATH_BIN):
-      shutil.rmtree (PATH_BIN)
-   os.makedirs (PATH_BIN)
+   build_prepare ()
 
    arch_os = 'catalina'
 
@@ -256,6 +283,17 @@ def build_catalina ():
    build_single_arch ('dfu-util', arch_os, ['bin/dfu-util'])
    build_single_arch ('libusb', arch_os, ['lib/libusb-1.0.0.dylib'])
 
+   build_single_arch (
+      'open-ocd', arch_os, ['bin/openocd', 'share/openocd'],
+      '0.11.0', '70eeaab9796e8356a5ad08c8f69e9fc7a86f9ef3f7060248ab49722dfeb95794'
+   )
+   build_single_arch ('libftdi', arch_os, ['lib/libftdi1.2.dylib'])
+   build_single_arch (
+      'hidapi', arch_os, ['lib/libhidapi.0.dylib'],
+      '0.12.0', '607766ce3cef88e33a8674b3c7cf69cdbe6124845c7ff223e07cceb2ec74df29'
+   )
+   build_single_arch ('capstone', arch_os, ['lib/libcapstone.4.dylib'])
+
    subprocess.check_call (
       ['ln', '-s', 'libcairo.2.dylib', 'libcairo.dylib'],
       cwd=PATH_BIN
@@ -270,16 +308,14 @@ def build_catalina ():
       'tar', '-zcf',
       os.path.join (PATH_ARTIFACTS, 'toolchain_catalina.tar.gz'),
       '-C', PATH_THIS,
-      'bin'
+      'bin', 'share'
    ])
 
 
 #-- build_big_sur ------------------------------------------------------------
 
 def build_big_sur ():
-   if os.path.exists (PATH_BIN):
-      shutil.rmtree (PATH_BIN)
-   os.makedirs (PATH_BIN)
+   build_prepare ()
 
    arch_oses = ['big_sur', 'arm64_big_sur']
 
@@ -301,6 +337,11 @@ def build_big_sur ():
    build_multi_arch ('dfu-util', arch_oses, ['bin/dfu-util'])
    build_multi_arch ('libusb', arch_oses, ['lib/libusb-1.0.0.dylib'])
 
+   build_multi_arch ('open-ocd', arch_oses, ['bin/openocd', 'share/openocd'])
+   build_multi_arch ('libftdi', arch_oses, ['lib/libftdi1.2.dylib'])
+   build_multi_arch ('hidapi', arch_oses, ['lib/libhidapi.0.dylib'])
+   build_multi_arch ('capstone', arch_oses, ['lib/libcapstone.4.dylib'])
+
    subprocess.check_call (
       ['ln', '-s', 'libcairo.2.dylib', 'libcairo.dylib'],
       cwd=PATH_BIN
@@ -315,7 +356,7 @@ def build_big_sur ():
       'tar', '-zcf',
       os.path.join (PATH_ARTIFACTS, 'toolchain_big_sur.tar.gz'),
       '-C', PATH_THIS,
-      'bin'
+      'bin', 'share'
    ])
 
 
