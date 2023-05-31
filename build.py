@@ -53,9 +53,9 @@ def download_brew_package (name, package_sha256):
 
 #-- extract_brew_package -----------------------------------------------------
 
-def extract_brew_package (name, package_sha256, os_arch):
+def extract_brew_package (name, package_sha256, arch_os):
    filename = os.path.join (PATH_ARTIFACTS, f'{package_sha256}.tar')
-   output_dir = os.path.join (PATH_ARTIFACTS, os_arch)
+   output_dir = os.path.join (PATH_ARTIFACTS, arch_os)
    if not os.path.exists (output_dir):
       os.makedirs (output_dir)
 
@@ -65,49 +65,55 @@ def extract_brew_package (name, package_sha256, os_arch):
 
 #-- get_formula_info ---------------------------------------------------------
 
-def get_formula_info (name):
+def get_formula_info (name, arch_oses):
    r = requests.get (f'https://formulae.brew.sh/api/formula/{name}.json')
    formula = json.loads (r.content)
    version = formula ['versions']['stable']
    if formula ['revision'] != 0:
       version += '_' + str (formula ['revision'])
+
+   archs = list (map (
+      lambda arch_os: { 'arch_os': arch_os, 'sha256': formula ['bottle']['stable']['files'][arch_os]['sha256'] },
+      arch_oses
+   ))
+
    return {
       'name': name,
-      ARCH_OSES [0]: formula ['bottle']['stable']['files'][ARCH_OSES [0]]['sha256'],
-      ARCH_OSES [1]: formula ['bottle']['stable']['files'][ARCH_OSES [1]]['sha256'],
       'version': version,
+      'archs': archs,
    }
 
 
 #-- download_formula ---------------------------------------------------------
 
 def download_formula (info):
-   for arch_os in ARCH_OSES:
-      download_brew_package (info ['name'], info [arch_os])
-      extract_brew_package (info ['name'], info [arch_os], arch_os)
+   name = info ['name']
+   for arch in info ['archs']:
+      arch_os = arch ['arch_os']
+      sha256 = arch ['sha256']
+      download_brew_package (name, sha256)
+      extract_brew_package (name, sha256, arch_os)
 
 
-#-- allow_write_exec ---------------------------------------------------------
+#-- allow_write ---------------------------------------------------------
 
-def allow_write_exec (info, item):
-   for arch_os in ARCH_OSES:
-      bin = os.path.join (PATH_ARTIFACTS, arch_os, info ['name'], info ['version'], item)
-      subprocess.check_call (['chmod', '755', bin])
-
-
-#-- allow_write_dylib --------------------------------------------------------
-
-def allow_write_dylib (info, item):
-   for arch_os in ARCH_OSES:
-      bin = os.path.join (PATH_ARTIFACTS, arch_os, info ['name'], info ['version'], item)
-      subprocess.check_call (['chmod', '644', bin])
+def allow_write (info, item):
+   name = info ['name']
+   version = info ['version']
+   for arch in info ['archs']:
+      arch_os = arch ['arch_os']
+      bin = os.path.join (PATH_ARTIFACTS, arch_os, name, version, item)
+      subprocess.check_call (['chmod', 'u+w', bin])
 
 
 #-- set_id -------------------------------------------------------------------
 
 def set_id (info, item):
-   for arch_os in ARCH_OSES:
-      bin = os.path.join (PATH_ARTIFACTS, arch_os, info ['name'], info ['version'], item)
+   name = info ['name']
+   version = info ['version']
+   for arch in info ['archs']:
+      arch_os = arch ['arch_os']
+      bin = os.path.join (PATH_ARTIFACTS, arch_os, name, version, item)
       subprocess.check_call ([
          'install_name_tool', '-id', item.split ('/')[-1],
          bin
@@ -117,8 +123,11 @@ def set_id (info, item):
 #-- set_dependent_shared_lib_erb ---------------------------------------------
 
 def set_dependent_shared_lib_erb (info, item):
-   for arch_os in ARCH_OSES:
-      bin = os.path.join (PATH_ARTIFACTS, arch_os, info ['name'], info ['version'], item)
+   name = info ['name']
+   version = info ['version']
+   for arch in info ['archs']:
+      arch_os = arch ['arch_os']
+      bin = os.path.join (PATH_ARTIFACTS, arch_os, name, version, item)
       output = subprocess.check_output (['otool', '-L', bin]).decode (sys.stdout.encoding)
       lines = output.split ('\n')
       for line in lines:
@@ -132,254 +141,120 @@ def set_dependent_shared_lib_erb (info, item):
 #-- pack ---------------------------------------------------------------------
 
 def pack (info, item):
-   bins = map (lambda arch_os: os.path.join (PATH_ARTIFACTS, arch_os, info ['name'], info ['version'], item), ARCH_OSES)
-   name = item.split ('/')[-1]
-   subprocess.check_call ([
-      'lipo', *bins,
-      '-output', os.path.join (PATH_BIN, name),
-      '-create'
-   ])
+   name = info ['name']
+   version = info ['version']
+   archs = info ['archs']
+   filename = item.split ('/')[-1]
+
+   if len (archs) == 2:
+      bins = map (lambda arch: os.path.join (PATH_ARTIFACTS, arch ['arch_os'], name, version, item), archs)
+      subprocess.check_call ([
+         'lipo', *bins,
+         '-output', os.path.join (PATH_BIN, filename),
+         '-create',
+      ])
+   else:
+      assert len (archs) == 1
+      arch_os = archs [0]['arch_os']
+      shutil.copy (
+         os.path.join (PATH_ARTIFACTS, arch_os, name, version, item),
+         os.path.join (PATH_BIN, filename)
+      )
 
 
-#-- build_cairo --------------------------------------------------------------
+#-- build_single_arch --------------------------------------------------------
 
-def build_cairo ():
-   info = get_formula_info ('cairo')
+def build_single_arch (name, arch_os, items, version=None, sha256=None):
+   if version:
+      info = {
+         'name': name,
+         'version': version,
+         'archs': [{
+            'arch_os': arch_os,
+            'sha256': sha256
+         }],
+      }
+   else:
+      info = get_formula_info (name, [arch_os])
+
    download_formula (info)
-   item = 'lib/libcairo.2.dylib'
-   allow_write_dylib (info, item)
-   set_id (info, item)
-   set_dependent_shared_lib_erb (info, item)
-   pack (info, item)
 
-
-#-- build_libpng -------------------------------------------------------------
-
-def build_libpng ():
-   # catalina disappeared in the latest update, but it was in 1.6.39 for some time
-   info = {
-      'name': 'libpng',
-      'catalina': '13780286d987167f7e50aea65947e1460a6616d0f1b224b37f8351775eab72f3',
-      'arm64_big_sur': 'cf59cedc91afc6f2f3377567ba82b99b97744c60925a5d1df6ecf923fdb2f234',
-      'version': '1.6.39',
-   }
-   download_formula (info)
-   item = 'lib/libpng16.16.dylib'
-   allow_write_dylib (info, item)
-   set_id (info, item)
-   set_dependent_shared_lib_erb (info, item)
-   pack (info, item)
-
-
-#-- build_freetype -----------------------------------------------------------
-
-def build_freetype ():
-   # catalina disappeared in the latest update, so take 2.12.1
-   info = {
-      'name': 'freetype',
-      'catalina': 'cafa6fee3a0ca54b1659f433667a145acef2c2d2061292d2f8bc088db7f0ea4f',
-      'arm64_big_sur': 'deb09510fb83adf76d9bb0d4ac4a3d3a2ddfff0d0154e09d3719edb73b058278',
-      'version': '2.12.1',
-   }
-   download_formula (info)
-   item = 'lib/libfreetype.6.dylib'
-   allow_write_dylib (info, item)
-   set_id (info, item)
-   set_dependent_shared_lib_erb (info, item)
-   pack (info, item)
-
-
-#-- build_fontconfig ---------------------------------------------------------
-
-def build_fontconfig ():
-   # catalina disappeared in the latest update, so take 2.14.1
-   info = {
-      'name': 'fontconfig',
-      'catalina': '1d6767bcdcf4390f88c120ca0beff6104d3339880950342802ad8b4b51520a6e',
-      'arm64_big_sur': '143b68331a6332cc0e1e3883e2863d65139869ac5bf1823bbe49fd2127d2c7f5',
-      'version': '2.14.1',
-   }
-   download_formula (info)
-   item = 'lib/libfontconfig.1.dylib'
-   allow_write_dylib (info, item)
-   set_id (info, item)
-   set_dependent_shared_lib_erb (info, item)
-   pack (info, item)
-
-
-#-- build_pixman -------------------------------------------------------------
-
-def build_pixman ():
-   # catalina disappeared in the latest update, so take 0.40.0
-   info = {
-      'name': 'pixman',
-      'catalina': '1862e6826a4bedb97af8dcb9ab849c69754226ed92e5ee19267fa33ee96f94f8',
-      'arm64_big_sur': 'da951aa8e872276034458036321dfa78e7c8b5c89b9de3844d3b546ff955c4c3',
-      'version': '0.40.0',
-   }
-   download_formula (info)
-   item = 'lib/libpixman-1.0.dylib'
-   allow_write_dylib (info, item)
-   set_id (info, item)
-   set_dependent_shared_lib_erb (info, item)
-   pack (info, item)
-
-
-#-- build_libxcb -------------------------------------------------------------
-
-def build_libxcb ():
-   # catalina disappeared in the latest update, so take 1.15
-   info = {
-      'name': 'libxcb',
-      'catalina': '035b1d299e3f1b41581e759981cf9a83aee2754c4b744cdcad4c7fe32de83ffb',
-      'arm64_big_sur': '6bf77051114dec12e0c541bc478d7833a992792047553fc821f3e1a17b82ec38',
-      'version': '1.15',
-   }
-   download_formula (info)
-   items = [
-      'lib/libxcb-shm.0.dylib',
-      'lib/libxcb.1.dylib',
-      'lib/libxcb-render.0.dylib',
-   ]
    for item in items:
-      allow_write_dylib (info, item)
-      set_id (info, item)
-      set_dependent_shared_lib_erb (info, item)
+      type = item.split ('/')[0]
+      if type in ['bin', 'lib']:
+         allow_write (info, item)
+         if type == 'lib':
+            set_id (info, item)
+         set_dependent_shared_lib_erb (info, item)
       pack (info, item)
 
 
-#-- build_libx11 -------------------------------------------------------------
+#-- build_multi_arch ---------------------------------------------------------
 
-def build_libx11 ():
-   # catalina disappeared in the latest update, so take 1.8.2
-   info = {
-      'name': 'libx11',
-      'catalina': '83b5c84a2f595ddb273b9eb9790109e542da3c21832df5cc6c90a1c328050389',
-      'arm64_big_sur': '4448aa22e8118de5775caf8488b666a211b01f50085a418fbbbcbfed2d83e517',
-      'version': '1.8.2',
-   }
+def build_multi_arch (name, arch_oses, items):
+   info = get_formula_info (name, arch_oses)
    download_formula (info)
-   item = 'lib/libX11.6.dylib'
-   allow_write_dylib (info, item)
-   set_id (info, item)
-   set_dependent_shared_lib_erb (info, item)
-   pack (info, item)
+   for item in items:
+      type = item.split ('/')[0]
+      if type in ['bin', 'lib']:
+         allow_write (info, item)
+         if type == 'lib':
+            set_id (info, item)
+         set_dependent_shared_lib_erb (info, item)
+      pack (info, item)
 
 
-#-- build_libxext ------------------------------------------------------------
+#-- build_catalina -----------------------------------------------------------
 
-def build_libxext ():
-   info = get_formula_info ('libxext')
-   download_formula (info)
-   item = 'lib/libXext.6.dylib'
-   allow_write_dylib (info, item)
-   set_id (info, item)
-   set_dependent_shared_lib_erb (info, item)
-   pack (info, item)
-
-
-#-- build_libxrender ---------------------------------------------------------
-
-def build_libxrender ():
-   # catalina disappeared in the latest update, so take 0.9.10
-   info = {
-      'name': 'libxrender',
-      'catalina': 'cb7f48876d362f919ed1c34ece8ec5abb16f6e414a6119655e3948fffab5dfab',
-      'arm64_big_sur': '46243f05a17674c00950dddc105b33aa479af7d605533d1aeada27d4d89d4275',
-      'version': '0.9.10',
-   }
-   download_formula (info)
-   item = 'lib/libXrender.1.dylib'
-   allow_write_dylib (info, item)
-   set_id (info, item)
-   set_dependent_shared_lib_erb (info, item)
-   pack (info, item)
-
-
-#-- build_libxau -------------------------------------------------------------
-
-def build_libxau ():
-   # catalina disappeared in the latest update, so take 1.0.10
-   info = {
-      'name': 'libxau',
-      'catalina': '1fc57a7cb97c7e4eecbd4b569070c36d12d9dd7f0d185a6513edf3fdc1b5696a',
-      'arm64_big_sur': '3f1c2890d5906b1e7562d6d8fac52f55f92fc88eb606fde7a15585327ed02e92',
-      'version': '1.0.10',
-   }
-   download_formula (info)
-   item = 'lib/libXau.6.dylib'
-   allow_write_dylib (info, item)
-   set_id (info, item)
-   set_dependent_shared_lib_erb (info, item)
-   pack (info, item)
-
-
-#-- build_libxdmcp -----------------------------------------------------------
-
-def build_libxdmcp ():
-   # catalina disappeared in the latest update, so take 1.1.3
-   info = {
-      'name': 'libxdmcp',
-      'catalina': '123c77fba2179591f3c1588808f33d231e9e04d8a91c99f6684d2c7eb64626b0',
-      'arm64_big_sur': '6c17c65a3f5768a620bc177f6ee189573993df7337c6614050c28e400dc6320c',
-      'version': '1.1.3',
-   }
-   download_formula (info)
-   item = 'lib/libXdmcp.6.dylib'
-   allow_write_dylib (info, item)
-   set_id (info, item)
-   set_dependent_shared_lib_erb (info, item)
-   pack (info, item)
-
-
-#-- build_dfu_util -----------------------------------------------------------
-
-def build_dfu_util ():
-   info = get_formula_info ('dfu-util')
-   download_formula (info)
-   item = 'bin/dfu-util'
-   allow_write_exec (info, item)
-   set_dependent_shared_lib_erb (info, item)
-   pack (info, item)
-
-
-#-- build_libusb -------------------------------------------------------------
-
-def build_libusb ():
-   info = get_formula_info ('libusb')
-   download_formula (info)
-   item = 'lib/libusb-1.0.0.dylib'
-   allow_write_dylib (info, item)
-   set_id (info, item)
-   set_dependent_shared_lib_erb (info, item)
-   pack (info, item)
-
-
-#-- main ---------------------------------------------------------------------
-
-def main ():
+def build_catalina ():
    if os.path.exists (PATH_BIN):
       shutil.rmtree (PATH_BIN)
    os.makedirs (PATH_BIN)
 
-   if os.path.exists (PATH_ARTIFACTS):
-      shutil.rmtree (PATH_ARTIFACTS)
-   os.makedirs (PATH_ARTIFACTS)
+   arch_os = 'catalina'
 
-   build_cairo ()
-   build_libpng ()
-   build_freetype ()
-   build_fontconfig ()
-   build_pixman ()
-   build_libxcb ()
-   build_libx11 ()
-   build_libxext ()
-   build_libxrender ()
-   build_libxau ()
-   build_libxdmcp ()
+   build_single_arch ('cairo', arch_os, ['lib/libcairo.2.dylib'])
+   build_single_arch (
+      'libpng', arch_os, ['lib/libpng16.16.dylib'], '1.6.39',
+      '13780286d987167f7e50aea65947e1460a6616d0f1b224b37f8351775eab72f3'
+   )
+   build_single_arch (
+      'freetype', arch_os, ['lib/libfreetype.6.dylib'], '2.12.1',
+      'cafa6fee3a0ca54b1659f433667a145acef2c2d2061292d2f8bc088db7f0ea4f'
+   )
+   build_single_arch (
+      'fontconfig', arch_os, ['lib/libfontconfig.1.dylib'], '2.14.1',
+      '1d6767bcdcf4390f88c120ca0beff6104d3339880950342802ad8b4b51520a6e'
+   )
+   build_single_arch (
+      'pixman', arch_os, ['lib/libpixman-1.0.dylib'], '0.40.0',
+      '1862e6826a4bedb97af8dcb9ab849c69754226ed92e5ee19267fa33ee96f94f8'
+   )
+   build_single_arch (
+      'libxcb', arch_os,
+      ['lib/libxcb-shm.0.dylib', 'lib/libxcb.1.dylib', 'lib/libxcb-render.0.dylib'],
+      '1.15', '035b1d299e3f1b41581e759981cf9a83aee2754c4b744cdcad4c7fe32de83ffb'
+   )
+   build_single_arch (
+      'libx11', arch_os, ['lib/libX11.6.dylib'], '1.8.2',
+      '83b5c84a2f595ddb273b9eb9790109e542da3c21832df5cc6c90a1c328050389'
+   )
+   build_single_arch ('libxext', arch_os, ['lib/libXext.6.dylib'])
+   build_single_arch (
+      'libxrender', arch_os, ['lib/libXrender.1.dylib'], '0.9.10',
+      'cb7f48876d362f919ed1c34ece8ec5abb16f6e414a6119655e3948fffab5dfab'
+   )
+   build_single_arch (
+      'libxau', arch_os, ['lib/libXau.6.dylib'], '1.0.10',
+      '1fc57a7cb97c7e4eecbd4b569070c36d12d9dd7f0d185a6513edf3fdc1b5696a'
+   )
+   build_single_arch (
+      'libxdmcp', arch_os, ['lib/libXdmcp.6.dylib'], '1.1.3',
+      '123c77fba2179591f3c1588808f33d231e9e04d8a91c99f6684d2c7eb64626b0'
+   )
 
-   build_dfu_util ()
-   build_libusb ()
+   build_single_arch ('dfu-util', arch_os, ['bin/dfu-util'])
+   build_single_arch ('libusb', arch_os, ['lib/libusb-1.0.0.dylib'])
 
    subprocess.check_call (
       ['ln', '-s', 'libcairo.2.dylib', 'libcairo.dylib'],
@@ -393,10 +268,66 @@ def main ():
 
    subprocess.check_call ([
       'tar', '-zcf',
-      os.path.join (PATH_ARTIFACTS, 'toolchain_macos.tar.gz'),
+      os.path.join (PATH_ARTIFACTS, 'toolchain_catalina.tar.gz'),
       '-C', PATH_THIS,
       'bin'
    ])
+
+
+#-- build_big_sur ------------------------------------------------------------
+
+def build_big_sur ():
+   if os.path.exists (PATH_BIN):
+      shutil.rmtree (PATH_BIN)
+   os.makedirs (PATH_BIN)
+
+   arch_oses = ['big_sur', 'arm64_big_sur']
+
+   build_multi_arch ('cairo', arch_oses, ['lib/libcairo.2.dylib'])
+   build_multi_arch ('libpng', arch_oses, ['lib/libpng16.16.dylib'])
+   build_multi_arch ('freetype', arch_oses, ['lib/libfreetype.6.dylib'])
+   build_multi_arch ('fontconfig', arch_oses, ['lib/libfontconfig.1.dylib'])
+   build_multi_arch ('pixman', arch_oses, ['lib/libpixman-1.0.dylib'])
+   build_multi_arch (
+      'libxcb', arch_oses,
+      ['lib/libxcb-shm.0.dylib', 'lib/libxcb.1.dylib', 'lib/libxcb-render.0.dylib']
+   )
+   build_multi_arch ('libx11', arch_oses, ['lib/libX11.6.dylib'])
+   build_multi_arch ('libxext', arch_oses, ['lib/libXext.6.dylib'])
+   build_multi_arch ('libxrender', arch_oses, ['lib/libXrender.1.dylib'])
+   build_multi_arch ('libxau', arch_oses, ['lib/libXau.6.dylib'])
+   build_multi_arch ('libxdmcp', arch_oses, ['lib/libXdmcp.6.dylib'])
+
+   build_multi_arch ('dfu-util', arch_oses, ['bin/dfu-util'])
+   build_multi_arch ('libusb', arch_oses, ['lib/libusb-1.0.0.dylib'])
+
+   subprocess.check_call (
+      ['ln', '-s', 'libcairo.2.dylib', 'libcairo.dylib'],
+      cwd=PATH_BIN
+   )
+
+   subprocess.check_call (
+      ['ln', '-s', 'libfreetype.6.dylib', 'libfreetype.dylib'],
+      cwd=PATH_BIN
+   )
+
+   subprocess.check_call ([
+      'tar', '-zcf',
+      os.path.join (PATH_ARTIFACTS, 'toolchain_big_sur.tar.gz'),
+      '-C', PATH_THIS,
+      'bin'
+   ])
+
+
+#-- main ---------------------------------------------------------------------
+
+def main ():
+   if os.path.exists (PATH_ARTIFACTS):
+      shutil.rmtree (PATH_ARTIFACTS)
+   os.makedirs (PATH_ARTIFACTS)
+
+   build_catalina ()
+   build_big_sur ()
 
 
 
