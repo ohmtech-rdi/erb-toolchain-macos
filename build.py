@@ -293,6 +293,10 @@ def build_catalina ():
       '0.12.0', '607766ce3cef88e33a8674b3c7cf69cdbe6124845c7ff223e07cceb2ec74df29'
    )
    build_single_arch ('capstone', arch_os, ['lib/libcapstone.4.dylib'])
+   build_single_arch (
+      'libusb-compat', arch_os, ['lib/libusb-0.1.4.dylib'],
+      '0.1.5_1', 'e1f03f77caed5418c50c3c9659e6c56f2363eddfd6cc1aac3f8dcac9451771d2'
+   )
 
    subprocess.check_call (
       ['ln', '-s', 'libcairo.2.dylib', 'libcairo.dylib'],
